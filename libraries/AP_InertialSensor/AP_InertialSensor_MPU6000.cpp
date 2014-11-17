@@ -299,19 +299,16 @@ bool AP_InertialSensor_MPU6000::update( void )
     hal.scheduler->resume_timer_procs();
 
     gyro *= _gyro_scale / num_samples;
-    _rotate_and_offset_gyro(_gyro_instance, gyro);
-
     accel *= MPU6000_ACCEL_SCALE_1G / num_samples;
+
+#if CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_PXF
+    gyro.rotate(ROTATION_PITCH_180_YAW_90);
+    accel.rotate(ROTATION_PITCH_180_YAW_90);
+#endif
+    _rotate_and_offset_gyro(_gyro_instance, gyro);
     _rotate_and_offset_accel(_accel_instance, accel);
 
     if (_last_filter_hz != _imu.get_filter()) {
-
-#if 0
-#if CONFIG_HAL_BOARD_SUBTYPE == HAL_BOARD_SUBTYPE_LINUX_PXF
-    _gyro[0].rotate(ROTATION_PITCH_180_YAW_90);
-    _accel[0].rotate(ROTATION_PITCH_180_YAW_90);
-#endif
-#endif
 
         if (_spi_sem->take(10)) {
             _spi->set_bus_speed(AP_HAL::SPIDeviceDriver::SPI_SPEED_LOW);
