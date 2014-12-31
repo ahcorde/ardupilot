@@ -36,7 +36,6 @@
  ****************************************************************************/
 
 #include <AP_HAL.h>
-#if NOT_YET
 
 #include "AP_InertialSensor_L3GD20.h"
 
@@ -61,7 +60,7 @@ extern const AP_HAL::HAL& hal;
 /* SPI protocol address bits */
 #define DIR_READ				(1<<7)
 #define DIR_WRITE				(0<<7)
-#define ADDR_INCREMENT				(1<<6)
+#define ADDR_INCREMENT			(1<<6)
 
 /* register addresses */
 #define ADDR_WHO_AM_I			0x0F
@@ -150,19 +149,31 @@ extern const AP_HAL::HAL& hal;
 // const float AP_InertialSensor_L3GD20::_gyro_scale = (0.0174532f / 16.4f);
 
 
-AP_InertialSensor_L3GD20::AP_InertialSensor_L3GD20() : 
-	AP_InertialSensor(),
+AP_InertialSensor_L3GD20::AP_InertialSensor_L3GD20(AP_InertialSensor &imu) : 
+    AP_InertialSensor_Backend(imu),
     _drdy_pin(NULL),
     _initialised(false),
+    _have_sample_available(false),
     _L3GD20_product_id(AP_PRODUCT_ID_NONE)
 {
 }
 
-uint16_t AP_InertialSensor_L3GD20::_init_sensor( Sample_rate sample_rate )
+AP_InertialSensor_Backend *AP_InertialSensor_L3GD20::detect(AP_InertialSensor &_imu)
 {
-    if (_initialised) return _L3GD20_product_id;
-    _initialised = true;
+    AP_InertialSensor_L3GD20 *sensor = new AP_InertialSensor_L3GD20(_imu);
+    if (sensor == NULL) {
+        return NULL;
+    }
+    if (!sensor->_init_sensor()) {
+        delete sensor;
+        return NULL;
+    }
 
+    return sensor;
+}
+
+bool AP_InertialSensor_L3GD20::_init_sensor( void )
+{
     _spi = hal.spi->device(AP_HAL::SPIDevice_L3GD20);
     _spi_sem = _spi->get_semaphore();
 
@@ -184,7 +195,7 @@ uint16_t AP_InertialSensor_L3GD20::_init_sensor( Sample_rate sample_rate )
 
     uint8_t tries = 0;
     do {
-        bool success = _hardware_init(sample_rate);
+        bool success = _hardware_init();
         if (success) {
             hal.scheduler->delay(5+2);
             if (!_spi_sem->take(100)) {
@@ -205,7 +216,9 @@ uint16_t AP_InertialSensor_L3GD20::_init_sensor( Sample_rate sample_rate )
     } while (1);
 
     hal.scheduler->resume_timer_procs();
-    
+
+    _gyro_instance = _imu.register_gyro();    
+    _accel_instance = _imu.register_accel();
 
     /* read the first lot of data.
      * _read_data_transaction requires the spi semaphore to be taken by
@@ -223,7 +236,7 @@ uint16_t AP_InertialSensor_L3GD20::_init_sensor( Sample_rate sample_rate )
 #if L3GD20_DEBUG
     _dump_registers();
 #endif
-    return _L3GD20_product_id;
+    return true;
 }
 
 /*================ AP_INERTIALSENSOR PUBLIC INTERFACE ==================== */
@@ -250,17 +263,25 @@ bool AP_InertialSensor_L3GD20::update( void )
         return false;
     }
 
+    _have_sample_available = false;
+
     // disable timer procs for mininum time
     hal.scheduler->suspend_timer_procs();
-    _gyro[0]  = Vector3f(_gyro_sum.x, _gyro_sum.y, _gyro_sum.z);
+
+    Vector3f _gyro;
+
+    _gyro  = Vector3f(_gyro_sum.x, _gyro_sum.y, _gyro_sum.z);
     _num_samples = _sum_count;
     _gyro_sum.zero();
     _sum_count = 0;
     hal.scheduler->resume_timer_procs();
 
-    _gyro[0].rotate(_board_orientation);
-    _gyro[0] *= _gyro_scale / _num_samples;
-    _gyro[0] -= _gyro_offset[0];
+    //_gyro.rotate(_board_orientation);
+    _gyro *= _gyro_scale / _num_samples;
+    //_gyro -= _gyro_offset[0];
+
+    _gyro.rotate(ROTATION_ROLL_180_YAW_90);
+    _rotate_and_offset_gyro(_gyro_instance, _gyro);
 
     // if (_last_filter_hz != _L3GD20_filter) {
     //     if (_spi_sem->take(10)) {
@@ -355,6 +376,8 @@ void AP_InertialSensor_L3GD20::_read_data_transaction() {
             return;
         }
 #endif
+
+    _have_sample_available  =true;
     _gyro_sum.x += raw_report.x;
     _gyro_sum.y  += raw_report.y;
     _gyro_sum.z  -= raw_report.z;
@@ -517,7 +540,7 @@ uint8_t AP_InertialSensor_L3GD20::set_range(uint8_t max_dps)
 	return 0;
 }
 
-bool AP_InertialSensor_L3GD20::_hardware_init(Sample_rate sample_rate)
+bool AP_InertialSensor_L3GD20::_hardware_init()
 {
     if (!_spi_sem->take(100)) {
         hal.scheduler->panic(PSTR("L3GD20: Unable to get semaphore"));
@@ -632,4 +655,3 @@ float AP_InertialSensor_L3GD20::get_delta_time() const
     // the sensor runs at 200Hz
     return 0.005 * _num_samples;
 }
-#endif
