@@ -341,6 +341,9 @@ AP_InertialSensor::_detect_backends(void)
     _add_backend(AP_InertialSensor_MPU9250::detect);
 #elif HAL_INS_DEFAULT == HAL_INS_MPU9255
     _add_backend(AP_InertialSensor_MPU9255::detect);
+#elif HAL_INS_DEFAULT == HAL_INS_LSM9DS0
+    _add_backend(AP_InertialSensor_L3GD20::detect);
+    _add_backend(AP_InertialSensor_LSM303D::detect);
 #elif HAL_INS_DEFAULT == HAL_INS_FLYMAPLE
     _add_backend(AP_InertialSensor_Flymaple::detect);
 #else
