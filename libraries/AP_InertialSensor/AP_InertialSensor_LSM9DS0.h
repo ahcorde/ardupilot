@@ -169,6 +169,7 @@ private:
     // the sum of the values since last read
     Vector3l _accel_sum;
     Vector3l _gyro_sum;
+    Vector3l _mag_sum;
 #endif
     volatile uint16_t _sum_count_g;
     volatile uint16_t _sum_count_xm;

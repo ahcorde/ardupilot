@@ -154,27 +154,18 @@ AP_InertialSensor_Backend *AP_InertialSensor_LSM9DS0::detect(AP_InertialSensor &
  */
 bool AP_InertialSensor_LSM9DS0::_init_sensor(void)
 {
-    _spi = hal.spi->device(AP_HAL::SPIDevice_LSM9DS0_AM);
+    _spi = hal.spi->device(AP_HAL::SPIDevice_LSM9DS0_G);
     _spi_sem = _spi->get_semaphore();
 
     _drdy_pin_a = hal.gpio->channel(BBB_P8_8);
     _drdy_pin_m = hal.gpio->channel(BBB_P8_10);
     _drdy_pin_g = hal.gpio->channel(BBB_P8_34);
 
-    // Store the resolutions in private variables
-    _calcgRes(G_SCALE_245DPS); // Calculate DPS / ADC tick, stored in gRes variable
-    _calcmRes(M_SCALE_2GS); // Calculate Gs / ADC tick, stored in mRes variable
-    _calcaRes(A_SCALE_2G); // Calculate g / ADC tick, stored in aRes variable
-
-    // Init the sensors
-    _initGyro();
-    _initAccel();
-    _initMag();
-
     hal.scheduler->suspend_timer_procs();
 
     uint8_t whoami = _register_read(WHO_AM_I_XM);
     hal.console->printf("LSM9DS0: WHOAMI 0x%x\n", (unsigned)whoami);
+//    if (whoami != 0xD4) {
     if (whoami != 0x49) {
         // TODO: we should probably accept multiple chip
         // revisions. This is the one on the PXF
@@ -188,12 +179,15 @@ bool AP_InertialSensor_LSM9DS0::_init_sensor(void)
         if (success) {
             hal.scheduler->delay(5+2);
             if (!_spi_sem->take(100)) {
+                hal.scheduler->panic(PSTR("LSM9DS0: Unable to get semaphore"));
                 return false;
             }
             if (_data_ready()) {
                 _spi_sem->give();
                 break;
             } else {
+                hal.console->println_P(
+                        PSTR("LSM9DS0 startup failed: no data ready"));
                 return false;
             }
             _spi_sem->give();
@@ -206,9 +200,21 @@ bool AP_InertialSensor_LSM9DS0::_init_sensor(void)
 
     hal.scheduler->resume_timer_procs();
 
+    _last_sample_time_micros = hal.scheduler->micros();
+
     // grab the used instances
     _gyro_instance = _imu.register_gyro();
     _accel_instance = _imu.register_accel();
+
+    /* read the first lot of data.
+     * _read_data_transaction requires the spi semaphore to be taken by
+     * its caller. */
+    hal.scheduler->delay(10);
+    if (_spi_sem->take(100)) {
+        _read_data_transaction_g();
+        _read_data_transaction_xm();
+        _spi_sem->give();
+    }
 
 #if LSM9DS0_DEBUG
     _dump_registers();
@@ -226,7 +232,6 @@ bool AP_InertialSensor_LSM9DS0::_sample_available()
 {
     _poll_data();
     return (_sum_count_g >> _sample_shift || _sum_count_xm >> _sample_shift) > 0;
-    //return true;
 }
 
 /*
@@ -236,13 +241,13 @@ bool AP_InertialSensor_LSM9DS0::update( void )
 {    
     //hal.console->printf("UPDATE\n");
    // wait for at least 1 sample
-    if (_sample_available()) {
-    }
     uint32_t start = hal.scheduler->millis();
-    while ((hal.scheduler->millis() - start) < 1000) {
-        hal.scheduler->delay_microseconds(100);
-        if (_sample_available()) {
-            continue;
+    if(!_sample_available()){
+        while ((hal.scheduler->millis() - start) < 1000) {
+            hal.scheduler->delay_microseconds(100);
+            if (_sample_available()) {
+                break;
+            }
         }
     }
 
@@ -255,17 +260,26 @@ bool AP_InertialSensor_LSM9DS0::update( void )
     gyro  = Vector3f(_gyro_sum.x, _gyro_sum.y, _gyro_sum.z);
     accel = Vector3f(_accel_sum.x, _accel_sum.y, _accel_sum.z);
 
-    _accel_sum.zero();
-    _gyro_sum.zero();
-
-    uint16_t _num_samples_g, _num_samples_xm;
+    float _num_samples_g, _num_samples_xm;
 
     _num_samples_g = _sum_count_g;
     _num_samples_xm = _sum_count_xm;
 
+    _accel_sum.zero();
+    _gyro_sum.zero();
+    _mag_sum.zero();
+    _sum_count_g = 0;
+    _sum_count_xm = 0;
+
     hal.scheduler->resume_timer_procs();
 
     //hal.console->printf(("-> %d\t%d\n"), gyro, accel);
+    //hal.console->printf(("----------------------\n"));
+    //hal.console->printf(("%.8f\t%.8f\t%.8f\n"), accel.x, accel.y, accel.z);
+    //hal.console->printf(("%.8f\t%.8f\t%.8f\n"), accel.x * _aRes / _num_samples_xm,
+    //                                            accel.y * _aRes / _num_samples_xm,
+    //                                            accel.z * _aRes / _num_samples_xm);
+    //hal.console->printf(("%.8f\t%.8f\t%.8f\n"), gyro.x, gyro.y, gyro.z);
 
     gyro *= _gRes / _num_samples_g;
     accel *= _aRes / _num_samples_xm;
@@ -280,7 +294,8 @@ bool AP_InertialSensor_LSM9DS0::update( void )
     _rotate_and_offset_gyro(_gyro_instance, gyro);
     _rotate_and_offset_accel(_accel_instance, accel);
 
-    hal.console->printf(("%.8f\t%.8f\t%.8f\n"), gyro.x, gyro.y, gyro.z);
+    //hal.console->printf(("%.8f\t%.8f\t%.8f\n"), gyro.x, gyro.y, gyro.z);
+    //hal.console->printf(("%.8f\t%.8f\t%.8f\n"), accel.x, accel.y, accel.z);
 
     if (_last_filter_hz != _imu.get_filter()) {
        if (_spi_sem->take(10)) {
@@ -290,53 +305,7 @@ bool AP_InertialSensor_LSM9DS0::update( void )
             _spi_sem->give();
         }
     }
-
-/*
-    _previous_accel[0] = _accel[0];
-
-    // disable timer procs for mininum time
-    hal.scheduler->suspend_timer_procs();
-    _gyro[0]  = Vector3f(_gyro_sum.x, _gyro_sum.y, _gyro_sum.z);
-    _accel[0] = Vector3f(_accel_sum.x, _accel_sum.y, _accel_sum.z);
-    // _mag[0] = Vector3f(_mag_sum.x, _mag_sum.y, _mag_sum.z);
-    
-    // TODO divide num_samples
-    _num_samples_g = _sum_count_g;
-    _num_samples_xm = _sum_count_xm;
-    
-    _accel_sum.zero();
-    _gyro_sum.zero();
-    _sum_count_g = 0;
-    _sum_count_xm = 0;
-    hal.scheduler->resume_timer_procs();
-
-    _gyro.rotate(_board_orientation);
-    _gyro *= _gRes / _num_samples_g;
-    _gyro -= _gyro_offset[0];
-
-    _accel.rotate(_board_orientation);
-    _accel *= _aRes / _num_samples_xm;
-
-    Vector3f accel_scaling = _accel_scale[0].get();
-    _accel.x *= accel_scaling.x;
-    _accel.y *= accel_scaling.y;
-    _accel.z *= accel_scaling.z;
-    _accel -= _accel_offset[0];
-
-    // // Configure mag
-    // _mag[0] *= _mRes / _num_samples_xm;
-
-    // if (_last_filter_hz != _mpu6000_filter) {
-    //     if (_spi_sem->take(10)) {
-    //         _spi->set_bus_speed(AP_HAL::SPIDeviceDriver::SPI_SPEED_LOW);
-    //         _set_filter_register(_mpu6000_filter, 0);
-    //         _spi->set_bus_speed(AP_HAL::SPIDeviceDriver::SPI_SPEED_HIGH);
-    //         _error_count = 0;
-    //         _spi_sem->give();
-    //     }
-    // }
     return true;
-*/
 }
 
 /*================ HARDWARE FUNCTIONS ==================== */
@@ -386,6 +355,7 @@ void AP_InertialSensor_LSM9DS0::_poll_data(void)
         if (_data_ready() == 1) {
             _last_sample_time_micros = hal.scheduler->micros();
             _read_data_transaction_g(); 
+            _read_data_transaction_xm();             
         } else if (_data_ready() == 2){
             _last_sample_time_micros = hal.scheduler->micros();
             _read_data_transaction_xm();             
@@ -401,6 +371,7 @@ void AP_InertialSensor_LSM9DS0::_poll_data(void)
             if (_data_ready() == 1) {
                 _last_sample_time_micros = hal.scheduler->micros();
                 _read_data_transaction_g(); 
+            _read_data_transaction_xm();             
             } else if (_data_ready() == 2){
                 _last_sample_time_micros = hal.scheduler->micros();
                 _read_data_transaction_xm();             
@@ -417,7 +388,6 @@ void AP_InertialSensor_LSM9DS0::_poll_data(void)
         }
     }
 }
-
 
 void AP_InertialSensor_LSM9DS0::_read_data_transaction_g()
 {
@@ -452,15 +422,12 @@ void AP_InertialSensor_LSM9DS0::_read_data_transaction_xm()
     uint16_t ax = (temp[1] << 8) | temp[0]; // Store x-axis values into ax
     uint16_t ay = (temp[3] << 8) | temp[2]; // Store y-axis values into ay
     uint16_t az = (temp[5] << 8) | temp[4]; // Store z-axis values into az    
-    
+
     _accel_sum.x  += ax;
     _accel_sum.y  += ay;
     _accel_sum.z  -= az;
     _sum_count_xm++;
-    if (_sum_count_xm == 0) {
-        _gyro_sum.zero();
-    }
-/*
+
     // read mag values
     for (uint8_t i=0;i<6;i++){
         temp[i] = _register_read(OUT_X_L_M + i);
@@ -472,13 +439,11 @@ void AP_InertialSensor_LSM9DS0::_read_data_transaction_xm()
     _mag_sum.x  += mx;
     _mag_sum.y  += my;
     _mag_sum.z  -= mz;    
-    _sum_count++;
 
-    if (_sum_count == 0) {
+    if (_sum_count_xm == 0) {
         _gyro_sum.zero();
         _mag_sum.zero();
     }
-*/
 }
 
 uint8_t AP_InertialSensor_LSM9DS0::_register_read( uint8_t reg )
@@ -577,6 +542,8 @@ void AP_InertialSensor_LSM9DS0::_calcmRes(mag_scale mScl)
 
 void AP_InertialSensor_LSM9DS0::_initGyro()
 {
+
+    hal.console->printf(("initGyro\n"));
     /* CTRL_REG1_G sets output data rate, bandwidth, power-down and enables
     Bits[7:0]: DR1 DR0 BW1 BW0 PD Zen Xen Yen
     DR[1:0] - Output data rate selection
@@ -639,6 +606,7 @@ void AP_InertialSensor_LSM9DS0::_initGyro()
 
 void AP_InertialSensor_LSM9DS0::_initAccel()
 {
+    hal.console->printf(("initAccel\n"));
     /* CTRL_REG0_XM (0x1F) (Default value: 0x00)
     Bits (7-0): BOOT FIFO_EN WTM_EN 0 0 HP_CLICK HPIS1 HPIS2
     BOOT - Reboot memory content (0: normal, 1: reboot)
@@ -688,58 +656,60 @@ void AP_InertialSensor_LSM9DS0::_initAccel()
 
 void AP_InertialSensor_LSM9DS0::_initMag()
 {   
-    /* CTRL_REG5_XM enables temp sensor, sets mag resolution and data rate
-    Bits (7-0): TEMP_EN M_RES1 M_RES0 M_ODR2 M_ODR1 M_ODR0 LIR2 LIR1
-    TEMP_EN - Enable temperature sensor (0=disabled, 1=enabled)
-    M_RES[1:0] - Magnetometer resolution select (0=low, 3=high)
-    M_ODR[2:0] - Magnetometer data rate select
-        000=3.125Hz, 001=6.25Hz, 010=12.5Hz, 011=25Hz, 100=50Hz, 101=100Hz
-    LIR2 - Latch interrupt request on INT2_SRC (cleared by reading INT2_SRC)
-        0=interrupt request not latched, 1=interrupt request latched
-    LIR1 - Latch interrupt request on INT1_SRC (cleared by readging INT1_SRC)
-        0=irq not latched, 1=irq latched                                     */
+
+    hal.console->printf(("initMag\n"));
+    // CTRL_REG5_XM enables temp sensor, sets mag resolution and data rate
+    //Bits (7-0): TEMP_EN M_RES1 M_RES0 M_ODR2 M_ODR1 M_ODR0 LIR2 LIR1
+    //TEMP_EN - Enable temperature sensor (0=disabled, 1=enabled)
+    //M_RES[1:0] - Magnetometer resolution select (0=low, 3=high)
+    //M_ODR[2:0] - Magnetometer data rate select
+    //    000=3.125Hz, 001=6.25Hz, 010=12.5Hz, 011=25Hz, 100=50Hz, 101=100Hz
+    //LIR2 - Latch interrupt request on INT2_SRC (cleared by reading INT2_SRC)
+    //    0=interrupt request not latched, 1=interrupt request latched
+    //LIR1 - Latch interrupt request on INT1_SRC (cleared by readging INT1_SRC)
+    //    0=irq not latched, 1=irq latched                                     
     _register_write(CTRL_REG5_XM, 0x14); // Mag data rate - 100 Hz
     hal.scheduler->delay(1);
 
-    /* CTRL_REG6_XM sets the magnetometer full-scale
-    Bits (7-0): 0 MFS1 MFS0 0 0 0 0 0
-    MFS[1:0] - Magnetic full-scale selection
-    00:+/-2Gauss, 01:+/-4Gs, 10:+/-8Gs, 11:+/-12Gs                           */
+    // CTRL_REG6_XM sets the magnetometer full-scale
+    //Bits (7-0): 0 MFS1 MFS0 0 0 0 0 0
+    //MFS[1:0] - Magnetic full-scale selection
+    //00:+/-2Gauss, 01:+/-4Gs, 10:+/-8Gs, 11:+/-12Gs                           
     _register_write(CTRL_REG6_XM, 0x00); // Mag scale to +/- 2GS
     hal.scheduler->delay(1);
 
-    /* CTRL_REG7_XM sets magnetic sensor mode, low power mode, and filters
-    AHPM1 AHPM0 AFDS 0 0 MLP MD1 MD0
-    AHPM[1:0] - HPF mode selection
-        00=normal (resets reference registers), 01=reference signal for filtering, 
-        10=normal, 11=autoreset on interrupt event
-    AFDS - Filtered acceleration data selection
-        0=internal filter bypassed, 1=data from internal filter sent to FIFO
-    MLP - Magnetic data low-power mode
-        0=data rate is set by M_ODR bits in CTRL_REG5
-        1=data rate is set to 3.125Hz
-    MD[1:0] - Magnetic sensor mode selection (default 10)
-        00=continuous-conversion, 01=single-conversion, 10 and 11=power-down */
+    // CTRL_REG7_XM sets magnetic sensor mode, low power mode, and filters
+    // AHPM1 AHPM0 AFDS 0 0 MLP MD1 MD0
+    //AHPM[1:0] - HPF mode selection
+    //    00=normal (resets reference registers), 01=reference signal for filtering, 
+    //    10=normal, 11=autoreset on interrupt event
+    //AFDS - Filtered acceleration data selection
+    //    0=internal filter bypassed, 1=data from internal filter sent to FIFO
+    //MLP - Magnetic data low-power mode
+    //    0=data rate is set by M_ODR bits in CTRL_REG5
+    //    1=data rate is set to 3.125Hz
+    //MD[1:0] - Magnetic sensor mode selection (default 10)
+    //    00=continuous-conversion, 01=single-conversion, 10 and 11=power-down 
     _register_write(CTRL_REG7_XM, 0x00); // Continuous conversion mode
     hal.scheduler->delay(1);
 
-    /* CTRL_REG4_XM is used to set interrupt generators on INT2_XM
-    Bits (7-0): P2_TAP P2_INT1 P2_INT2 P2_INTM P2_DRDYA P2_DRDYM P2_Overrun P2_WTM
-    */
+    // CTRL_REG4_XM is used to set interrupt generators on INT2_XM
+    //Bits (7-0): P2_TAP P2_INT1 P2_INT2 P2_INTM P2_DRDYA P2_DRDYM P2_Overrun P2_WTM
+    //
     _register_write(CTRL_REG4_XM, 0x04); // Magnetometer data ready on INT2_XM (0x08)
     hal.scheduler->delay(1);
 
-    /* INT_CTRL_REG_M to set push-pull/open drain, and active-low/high
-    Bits[7:0] - XMIEN YMIEN ZMIEN PP_OD IEA IEL 4D MIEN
-    XMIEN, YMIEN, ZMIEN - Enable interrupt recognition on axis for mag data
-    PP_OD - Push-pull/open-drain interrupt configuration (0=push-pull, 1=od)
-    IEA - Interrupt polarity for accel and magneto
-        0=active-low, 1=active-high
-    IEL - Latch interrupt request for accel and magneto
-        0=irq not latched, 1=irq latched
-    4D - 4D enable. 4D detection is enabled when 6D bit in INT_GEN1_REG is set
-    MIEN - Enable interrupt generation for magnetic data
-        0=disable, 1=enable) */
+    // INT_CTRL_REG_M to set push-pull/open drain, and active-low/high
+    //Bits[7:0] - XMIEN YMIEN ZMIEN PP_OD IEA IEL 4D MIEN
+    //XMIEN, YMIEN, ZMIEN - Enable interrupt recognition on axis for mag data
+    //PP_OD - Push-pull/open-drain interrupt configuration (0=push-pull, 1=od)
+    //IEA - Interrupt polarity for accel and magneto
+    //    0=active-low, 1=active-high
+    //IEL - Latch interrupt request for accel and magneto
+    //    0=irq not latched, 1=irq latched
+    //4D - 4D enable. 4D detection is enabled when 6D bit in INT_GEN1_REG is set
+    //MIEN - Enable interrupt generation for magnetic data
+    //    0=disable, 1=enable) 
     _register_write(INT_CTRL_REG_M, 0x09); // Enable interrupts for mag, active-low, push-pull
     hal.scheduler->delay(1);
 }

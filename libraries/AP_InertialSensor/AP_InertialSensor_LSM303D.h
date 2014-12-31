@@ -10,16 +10,32 @@
 #include "AP_InertialSensor.h"
 
 // enable debug to see a register dump on startup
-#define LSM303D_DEBUG 0
+#define LSM303D_DEBUG 1
 
-class AP_InertialSensor_LSM303D: public AP_InertialSensor
+class AP_InertialSensor_LSM303D: public AP_InertialSensor_Backend
 {
 public:
 
-    AP_InertialSensor_LSM303D();
+    AP_InertialSensor_LSM303D(AP_InertialSensor &imu);
 
     /* Concrete implementation of AP_InertialSensor functions: */
     bool                update();
+
+    bool gyro_sample_available(void) { return _have_sample_available; }
+    bool accel_sample_available(void) { return _have_sample_available; }
+
+
+    // detect the sensor
+    static AP_InertialSensor_Backend *detect(AP_InertialSensor &imu);
+
+private:
+
+    // instance numbers of accel and gyro data
+    uint8_t _accel_instance;
+    uint8_t _gyro_instance;
+
+    AP_HAL::DigitalSource *_drdy_pin_x;
+    AP_HAL::DigitalSource *_drdy_pin_m;
 
     // wait for a sample to be available, with timeout in milliseconds
     bool                wait_for_sample(uint16_t timeout_ms);
@@ -31,12 +47,7 @@ public:
     bool healthy(void) const { return _error_count <= 4; }
     bool get_accel_health(uint8_t instance) const { return healthy(); }
 
-protected:
-    uint16_t                    _init_sensor( Sample_rate sample_rate );
-
 private:
-    AP_HAL::DigitalSource *_drdy_pin_x;
-    AP_HAL::DigitalSource *_drdy_pin_m;
     uint8_t         _accel_range_m_s2;
     float           _accel_range_scale;
     uint8_t         _accel_samplerate;    
@@ -50,6 +61,7 @@ private:
     uint8_t         _reg1_expected;
     uint8_t         _reg7_expected;
 
+    bool             _init_sensor( void );
     bool                 _sample_available();
     void                 _read_data_transaction();
     void                 _read_data_transaction_accel();
@@ -58,9 +70,10 @@ private:
     void                 _poll_data(void);
     uint8_t              _register_read( uint8_t reg );
     void                 _register_write( uint8_t reg, uint8_t val );
+    bool                 _hardware_init(void);
+
     void                 _register_write_check(uint8_t reg, uint8_t val);
     void                 _register_modify(uint8_t reg, uint8_t clearbits, uint8_t setbits);
-    bool                 _hardware_init(Sample_rate sample_rate);
     void                 disable_i2c(void);
     uint8_t              accel_set_range(uint8_t max_g);
     uint8_t              accel_set_samplerate(uint16_t frequency);
@@ -77,10 +90,6 @@ private:
 
     uint32_t _last_sample_time_micros;
 
-    // ensure we can't initialise twice
-    bool                        _initialised;
-    int16_t              _LSM303D_product_id;
-
     // how many hardware samples before we report a sample to the caller
     uint8_t _sample_shift;
 
@@ -96,6 +105,10 @@ private:
     Vector3l _accel_sum;
     Vector3l _mag_sum;
     volatile int16_t _sum_count;
+
+    // do we currently have a sample pending?
+    bool _have_sample_available;
+
 
 public:
 
